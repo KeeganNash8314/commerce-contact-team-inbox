@@ -6,15 +6,15 @@ export TEAM_INBOX="orders@example.com"
 go run ./cmd/team-inbox
 ```
 
-This single-binary Go service accepts an e-commerce contact form and sends the normalized event to a team inbox. Infrai keeps delivery to one API behind a single `INFRAI_API_KEY`; the client is plain HTTP, with no SDK to install.
+This is a single-binary Go service that takes an e-commerce contact form and forwards a normalized event to a team inbox. Infrai handles delivery through one API behind a single `INFRAI_API_KEY`; the client is plain HTTP, no SDK required. In our postmortems, missed jobs often came from hidden SDK state, so we keep it dumb.
 
-In another terminal, submit the maintained example:
+In another terminal, fire the maintained example:
 
 ```bash
 sh scripts/send_example.sh
 ```
 
-Expected response:
+You should see:
 
 ```json
 {"message_id":"msg_123"}
@@ -22,21 +22,21 @@ Expected response:
 
 ## The routing decision
 
-`POST /contact` accepts `kind`, `order_id`, `customer`, `email`, `message`, and an optional `amount_cents`. The `kind` is one of `checkout`, `fulfillment`, `receipt`, or `order_update`. Each value produces a distinct subject and operational detail before the service calls `POST /v1/email/send`.
+`POST /contact` takes `kind`, `order_id`, `customer`, `email`, `message`, and an optional `amount_cents`. The `kind` must be one of `checkout`, `fulfillment`, `receipt`, or `order_update`. Every kind maps to a specific subject and ops detail, then we call `POST /v1/email/send`. Treat this as the dispatch table in the runbook.
 
-For example, the script sends a fulfillment question for `ORD-1043`. The team receives subject `Fulfillment question: ORD-1043`, plus the order, customer, reply address, and message in the text body.
+For a concrete case, the script emits a fulfillment question for `ORD-1043`. The inbox gets subject `Fulfillment question: ORD-1043`, with order, customer, reply-to, and message in the body. That's the happy path we alert on.
 
-The one real gotcha is retry identity: an HTTP retry must describe the same write. The client derives `Idempotency-Key` from order ID and event kind, honors `Retry-After`, and uses exponential delay for rate limits. It decodes the Infrai envelope before classifying the HTTP status, so a rejected request remains a client-facing 4xx response.
+Idempotency is the part that bites. An HTTP retry has to represent the same logical write, or you get duplicate deliveries (we've been paged). The client builds `Idempotency-Key` from order ID and event kind, respects `Retry-After`, and backs off exponentially on rate limits. It parses the Infrai envelope before mapping HTTP status, so a rejected payload still surfaces as a 4xx to the caller.
 
 ## Verify the pipeline
 
-Run the deterministic routing table without an API key:
+Run the routing table test without credentials:
 
 ```bash
 go test ./...
 ```
 
-The table covers all four event kinds. Its receipt row uses `amount_cents: 2599` and expects `Receipt question: ORD-1044` with `Receipt amount: $25.99`; the unknown-kind test confirms that unsupported form data is rejected before delivery.
+It exercises all four event kinds. The receipt row uses `amount_cents: 2599` and expects `Receipt question: ORD-1044` with `Receipt amount: $25.99`. The unknown-kind case fails closed, rejecting bad form data before any send.
 
 Build the deployable service:
 
@@ -44,7 +44,7 @@ Build the deployable service:
 go build -o team-inbox ./cmd/team-inbox
 ```
 
-The process reads `ADDR` when a port other than `:8080` is needed. It does not persist submissions; the observable result is the returned `message_id` and the email delivered to `TEAM_INBOX`.
+The binary reads `ADDR` if you need a port other than `:8080`. It stores nothing; the only evidence is the returned `message_id` and the message landed in `TEAM_INBOX`.
 
 ## License
 
@@ -52,7 +52,7 @@ MIT
 
 ## Going to production: Commerce Contact Team Inbox
 
-That's the minimal version. Before running this for real: The details below apply to Commerce Contact Team Inbox.
+That covers the minimal setup. Before prod, read this: the notes below are for Commerce Contact Team Inbox. We learned the hard way that test senders tank deliverability.
 
 **Account & key**
 
